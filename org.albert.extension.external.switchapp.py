@@ -5,78 +5,102 @@ import sys
 import re
 import os
 import json
+import commands
+from ConfigParser import SafeConfigParser
+
+
+"""
+A window switcher that opens existing applications
+requires: wmctrl
+"""
+
 
 albert_op = os.environ.get('ALBERT_OP')
+
+APP_DIR = "/usr/share/applications/"
+LOCAL_APP_DIR = os.path.expanduser("~/.local/share/applications/")
 
 if albert_op == 'METADATA':
 	metadata = """{
 	"iid": "org.albert.extension.external/v2.0",
-	"name": "WindowSwitcher",
+	"name": "AppSwitch",
 	"version": "1.0",
-	"author": "Klesh Wong",
+	"author": "Daniel Newman",
 	"dependencies": [],
 	"trigger": "-"
 	}"""
 	print(metadata)
 	sys.exit(0)
+
+elif albert_op == "NAME":
+	print("AppSwitch")
+	sys.exit(0)
+
+elif albert_op == "INITIALIZE":
+	if not commands.getstatusoutput("which wmctrl")[0] is 0:
+		sys.exit(1)
+	sys.exit(0)
+
 elif albert_op == 'QUERY':
-	albert_query = os.environ.get('ALBERT_QUERY')
+	def parse_config_file(program):
+		config_file = ""
+		parts = program.split('.')
 
-	if albert_query:
-		albert_query = albert_query[1:]
+		for part in parts:
+			if os.path.exists(APP_DIR + part + ".desktop"):
+				config_file = APP_DIR + part + ".desktop"
+				break
 
-	windowStr, error = subprocess.Popen(['wmctrl', '-lp'], stdout=subprocess.PIPE).communicate()
+			if os.path.exists(LOCAL_APP_DIR + part + ".desktop"):
+				config_file = LOCAL_APP_DIR + part + ".desktop"
+				break
 
-	patternPidAndName = re.compile(r'^(\w+)\s+(\d+)\s+(\d+)\s+(.+)$')
-	patternProcessName = re.compile(r'^\s+\d+\s+[^\s]+\s+[^\s]+\s+(.+)$')
+		if config_file == "":
+			return ["",""]
+		else:
+			parser = SafeConfigParser()
+			parser.read(config_file)
+			return [parser.get("Desktop Entry","Name"), parser.get("Desktop Entry","Icon")]
+
+
+	albert_query = "".join(os.environ.get("ALBERT_QUERY").split("-")[1:]).lower()
+
+	window_list = commands.getoutput("wmctrl -lpx | awk '{printf $1\"|\"$3\"|\"$4\"|\"; $1=$2=$3=$4=$5=\"\"; gsub(/^ /,\"\",$0); print $0}'").split("\n")
 
 	items = []
 
-	for line in windowStr.split('\n'):
-		match = patternPidAndName.match(line)
+	for line in window_list:
+		wid, pid, program, window_name = line.split('|')
 
-		if not match:
+		name, icon = parse_config_file(program)
+
+		search_str = (name + " " + window_name).lower()
+
+		if not name:
+			name = window_name
+
+		description = window_name
+
+		if albert_query and albert_query not in search_str:
 			continue
 
-		wid = match.group(1)
-		pid = match.group(3)
-		name = match.group(4)
+		item = {
+			'id' : wid,
+			'name' : name,
+			'icon': icon,
+			'description': description,
+			'completion': 'switched',
+			'actions' : [{
+				'name': 'Activate',
+				'command': 'wmctrl',
+				'arguments': ["-ia",wid]
+			}]
+		}
 
-		pidStr, error = subprocess.Popen(['ps', '-p', pid, '--no-headers'], stdout=subprocess.PIPE).communicate()
+		items.append(item)
 
-		if error:
-			sys.exit(1)
+	print(json.dumps({'items': items}))
+	sys.exit(0)
 
-		match = patternProcessName.match(pidStr)
-
-		if match:
-			name = match.group(1) + ' - ' + name
-
-			if albert_query and albert_query.lower() not in name.lower():
-				continue
-
-			item = {
-			 'id' : wid,
-			 'name' : name,
-			 'actions' : [{
-				 'name': 'Activate',
-				 'command': 'python',
-				 'arguments': [
-					 __file__,
-					 str(wid)
-				 ]
-			 }]
-			}
-
-			items.append(item)
-
-	resp = {
-		'items' : items
-	}
-
-	print(json.dumps(resp))
-
-
-if len(sys.argv) > 1:
-	window_id = sys.argv[1]
-	subprocess.Popen(['wmctrl', '-ia', window_id])
+elif albert_op in ["FINALIZE", "SETUPSESSION", "TEARDOWNSESSION"]:
+	sys.exit(0)
